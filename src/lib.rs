@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +56,7 @@ struct ClusterState {
     name: String,
     max_running: AtomicU64,
     running: AtomicU64,
+    admissions: AtomicU64,
 }
 
 impl ClusterState {
@@ -64,6 +65,7 @@ impl ClusterState {
             name: config.name.clone(),
             max_running: AtomicU64::new(config.max_running),
             running: AtomicU64::new(0),
+            admissions: AtomicU64::new(0),
         }
     }
 
@@ -121,14 +123,12 @@ fn pick(candidates: &[Candidate]) -> Option<usize> {
 
 pub struct ClusterPool {
     groups: RwLock<HashMap<String, Vec<Arc<ClusterState>>>>,
-    admissions: Mutex<HashMap<String, u64>>,
 }
 
 impl ClusterPool {
     pub fn new(config: PoolConfig) -> Arc<Self> {
         Arc::new(Self {
             groups: RwLock::new(build_groups(&config)),
-            admissions: Mutex::new(HashMap::new()),
         })
     }
 
@@ -164,17 +164,10 @@ impl ClusterPool {
                 continue;
             }
 
-            *self
-                .admissions
-                .lock()
-                .unwrap()
-                .entry(format!("{group}/{}", state.name))
-                .or_insert(0) += 1;
+            state.admissions.fetch_add(1, Ordering::Relaxed);
 
             return Ok(Permit {
-                pool: Arc::clone(self),
-                group: group.to_string(),
-                cluster: state.name.clone(),
+                state: Arc::clone(state),
             });
         }
 
@@ -210,11 +203,8 @@ impl ClusterPool {
 
     /// Total queries ever admitted to a cluster (a metric scraped by Prometheus).
     pub fn admissions(&self, group: &str, cluster: &str) -> u64 {
-        self.admissions
-            .lock()
-            .unwrap()
-            .get(&format!("{group}/{cluster}"))
-            .copied()
+        self.find(group, cluster)
+            .map(|state| state.admissions.load(Ordering::Relaxed))
             .unwrap_or(0)
     }
 
@@ -263,14 +253,12 @@ fn build_groups(config: &PoolConfig) -> HashMap<String, Vec<Arc<ClusterState>>> 
 
 /// Proof of admission. The holder may run one query on `cluster()`.
 pub struct Permit {
-    pool: Arc<ClusterPool>,
-    group: String,
-    cluster: String,
+    state: Arc<ClusterState>,
 }
 
 impl Permit {
     pub fn cluster(&self) -> &str {
-        &self.cluster
+        &self.state.name
     }
 
     // /// Give the slot back once the query has finished.
@@ -281,6 +269,6 @@ impl Permit {
 
 impl Drop for Permit {
     fn drop(&mut self) {
-        self.pool.release(&self.group, &self.cluster);
+        self.state.decrement();
     }
 }

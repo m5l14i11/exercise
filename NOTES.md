@@ -13,13 +13,24 @@
 
 Machine (M1 Pro 16GB 8 Core (6 Performance and 2 Efficiency)):
 
-| Bench | Before | After |
+| Bench | Before | After Fixes | After Atomic admissions | After Permit Refactor
 |-------|--------|-------|
-| acquire_release/1  | 626.69 ns | |
-| acquire_release/4  | 5.4169 µs | |
-| acquire_release/16 | 28.749 µs | |
+| acquire_release/1  | 626.69 ns | 605.38 ns | 272.86 ns | 126.08 ns |
+| acquire_release/4  | 5.4169 µs | 4.7635 µs | 4.2932 µs | 2.1889 µs |
+| acquire_release/16 | 28.749 µs | 24.573 µs | 11.427 µs | 6.6278 µs |
 
 Changes, and why each one helps (or didn't):
+INC-1: atomic reservation with CAS	Correct direction. Prevents concurrent callers from both successfully reserving the same final slot.
+INC-2: saturating_sub. Prevents unsigned underflow when capacity is reduced below the current running count.
+INC-3: retry other clusters after reservation failureAvoids returning Busy merely because the initially preferred cluster lost a race.
+Atomic admissions counters. Replaced the shared admissions-metrics mutex with a per-cluster AtomicU64. This removes global lock contention from the successful admission path.
+Permit refactor. Changed Permit to hold an Arc<ClusterState> and release capacity directly through that state in Drop. This avoids a pool lookup and per-permit group/cluster string storage, and ensures the permit decrements the exact state it reserved, even if configuration changes.
+-
+
+Selection policy, and why:
+Best-available-capacity-first: Prioritizes clusters with the most available slots to distribute load toward clusters with greater headroom.
+CAS-based reservation: Treats the atomic reservation as authoritative, preventing concurrent requests from exceeding a cluster’s capacity.
+Fallback on contention: Retries other clusters when reservation fails, reducing unnecessary Busy responses.
 
 -
 
