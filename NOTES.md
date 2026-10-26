@@ -36,6 +36,15 @@ Fallback on contention: Retries other clusters when reservation fails, reducing 
 
 ## Part 4: Global admission across 6 pods
 
+Design: Introduce a strongly consistent, shared admission coordinator that enforces capacity across all gateway pods. Each admitted query holds a time-bounded reservation, while each pod maintains local state for fast admission and waiting.
+
+Hot path: Coordinating every query centrally adds latency and limits throughput. Batch reservations to reduce coordination overhead, while counting all reserved capacity against the global limit. Balance batch size against utilization and contention between pods.
+
+Failure handling: Reservations must be recoverable when a pod dies, without permanently consuming capacity. If coordination is lost, pods must not admit work using expired or unverified reservations. They should stop admitting affected queries and cancel running work when its reservation can no longer be guaranteed. Lease expiry, bounded cancellation delays, and reconciliation help limit inconsistencies.
+
+Availability trade-off: Prefer preserving the global capacity limit over accepting potentially unsafe admissions during a partition. A restricted fallback quota is possible only if quotas and gateway membership are coordinated and cannot collectively exceed the global cap.
+
+Scope: Keep the local admission controller responsible for fast selection, capacity tracking, and waiter notification. Delegate global coordination to a proven consistency system rather than implementing consensus or relying on eventually consistent counters. Monitor reservation utilization, expiry, cancellation, and coordination latency.
 
 ## Bonus: INC-5 and INC-6
 
