@@ -76,16 +76,27 @@ impl ClusterState {
     }
 
     fn available(&self) -> u64 {
-        self.max_running() - self.running()
+        self.max_running().saturating_sub(self.running())
     }
 
     fn try_increment(&self) -> bool {
-        let current = self.running.load(Ordering::Relaxed);
-        if current >= self.max_running() {
-            return false;
+        let mut current = self.running.load(Ordering::Relaxed);
+
+        loop {
+            if current >= self.max_running() {
+                return false;
+            }
+
+            match self.running.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(actual) => current = actual,
+            }
         }
-        self.running.store(current + 1, Ordering::Relaxed);
-        true
     }
 
     fn decrement(&self) {
@@ -135,38 +146,39 @@ impl ClusterPool {
     pub fn try_acquire(self: &Arc<Self>, group: &str) -> Result<Permit, AcquireError> {
         let clusters = self.clusters(group).ok_or(AcquireError::UnknownGroup)?;
 
-        let candidates: Vec<Candidate> = clusters
-            .iter()
-            .map(|c| Candidate {
-                name: c.name.clone(),
-                available: c.available(),
-            })
-            .filter(|c| c.available > 0)
-            .collect();
-
-        let chosen = pick(&candidates).ok_or(AcquireError::Busy)?;
-        let name = candidates[chosen].name.clone();
-        let state = clusters
-            .iter()
-            .find(|c| c.name == name)
-            .ok_or(AcquireError::Busy)?;
-
-        if !state.try_increment() {
+        if clusters.is_empty() {
             return Err(AcquireError::Busy);
         }
 
-        *self
-            .admissions
-            .lock()
-            .unwrap()
-            .entry(format!("{group}/{name}"))
-            .or_insert(0) += 1;
+        let mut order: Vec<usize> = (0..clusters.len()).collect();
+        order.sort_by_key(|&i| std::cmp::Reverse(clusters[i].available()));
 
-        Ok(Permit {
-            pool: Arc::clone(self),
-            group: group.to_string(),
-            cluster: name,
-        })
+        for i in order {
+            let state = &clusters[i];
+
+            if state.available() == 0 {
+                continue;
+            }
+
+            if !state.try_increment() {
+                continue;
+            }
+
+            *self
+                .admissions
+                .lock()
+                .unwrap()
+                .entry(format!("{group}/{}", state.name))
+                .or_insert(0) += 1;
+
+            return Ok(Permit {
+                pool: Arc::clone(self),
+                group: group.to_string(),
+                cluster: state.name.clone(),
+            });
+        }
+
+        Err(AcquireError::Busy)
     }
 
     /// Part 3: like `try_acquire`, but wait up to `wait` for a slot to free up.
@@ -240,7 +252,10 @@ fn build_groups(config: &PoolConfig) -> HashMap<String, Vec<Arc<ClusterState>>> 
         .groups
         .iter()
         .map(|(group, clusters)| {
-            let states = clusters.iter().map(|c| Arc::new(ClusterState::new(c))).collect();
+            let states = clusters
+                .iter()
+                .map(|c| Arc::new(ClusterState::new(c)))
+                .collect();
             (group.clone(), states)
         })
         .collect()
@@ -258,8 +273,14 @@ impl Permit {
         &self.cluster
     }
 
-    /// Give the slot back once the query has finished.
-    pub fn release(self) {
+    // /// Give the slot back once the query has finished.
+    // pub fn release(self) {
+    //     self.pool.release(&self.group, &self.cluster);
+    // }
+}
+
+impl Drop for Permit {
+    fn drop(&mut self) {
         self.pool.release(&self.group, &self.cluster);
     }
 }

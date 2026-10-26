@@ -37,7 +37,7 @@ fn admits_up_to_capacity_then_busy() {
     assert_eq!(pool.running("g", "a"), Some(2));
     assert_eq!(pool.running("g", "b"), Some(1));
 
-    permits.into_iter().for_each(|p| p.release());
+    permits.into_iter().for_each(|p| drop(p));
     assert_eq!(pool.running("g", "a"), Some(0));
     assert_eq!(pool.admissions("g", "a"), 2);
     assert_eq!(pool.admissions("g", "b"), 1);

@@ -45,7 +45,7 @@ async fn waiter_gets_the_slot_when_it_is_released() {
     wait_until("one queued waiter", || pool.queued("g") == 1).await;
 
     let released_at = Instant::now();
-    held.release();
+    drop(held);
     let permit = waiter.await.unwrap().unwrap();
     assert!(released_at.elapsed() < Duration::from_millis(100), "waiter was not woken promptly");
     assert_eq!(permit.cluster(), "a");
