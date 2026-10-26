@@ -10,12 +10,12 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::pin::pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::time::{timeout_at, Instant};
-use std::pin::pin;
 
 #[derive(Debug, Default)]
 struct Waiters {
@@ -207,7 +207,7 @@ impl ClusterPool {
         group: &str,
         wait: Duration,
     ) -> Result<Permit, AcquireError> {
-       let deadline = Instant::now() + wait;
+        let deadline = Instant::now() + wait;
 
         let waiters = {
             let clusters = self.clusters(group).ok_or(AcquireError::UnknownGroup)?;
