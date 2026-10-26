@@ -243,11 +243,11 @@ impl ClusterPool {
         }
     }
 
-    fn release(&self, group: &str, cluster: &str) {
-        if let Some(state) = self.find(group, cluster) {
-            state.decrement();
-        }
-    }
+    // fn release(&self, group: &str, cluster: &str) {
+    //     if let Some(state) = self.find(group, cluster) {
+    //         state.decrement();
+    //     }
+    // }
 
     /// Current running count for a cluster, or `None` if it is not in the current config.
     pub fn running(&self, group: &str, cluster: &str) -> Option<u64> {
