@@ -13,6 +13,30 @@ use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+use tokio::sync::Notify;
+use tokio::time::{timeout_at, Instant};
+use std::pin::pin;
+
+#[derive(Debug, Default)]
+struct Waiters {
+    notify: Notify,
+    queued: AtomicU64,
+}
+
+struct QueueGuard(Arc<Waiters>);
+
+impl QueueGuard {
+    fn new(waiters: &Arc<Waiters>) -> Self {
+        waiters.queued.fetch_add(1, Ordering::Relaxed);
+        Self(Arc::clone(waiters))
+    }
+}
+
+impl Drop for QueueGuard {
+    fn drop(&mut self) {
+        self.0.queued.fetch_sub(1, Ordering::Relaxed);
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClusterConfig {
@@ -57,15 +81,17 @@ struct ClusterState {
     max_running: AtomicU64,
     running: AtomicU64,
     admissions: AtomicU64,
+    waiters: Arc<Waiters>,
 }
 
 impl ClusterState {
-    fn new(config: &ClusterConfig) -> Self {
+    fn new(config: &ClusterConfig, waiters: Arc<Waiters>) -> Self {
         Self {
             name: config.name.clone(),
             max_running: AtomicU64::new(config.max_running),
             running: AtomicU64::new(0),
             admissions: AtomicU64::new(0),
+            waiters,
         }
     }
 
@@ -103,6 +129,7 @@ impl ClusterState {
 
     fn decrement(&self) {
         self.running.fetch_sub(1, Ordering::Relaxed);
+        self.waiters.notify.notify_one();
     }
 }
 
@@ -180,8 +207,40 @@ impl ClusterPool {
         group: &str,
         wait: Duration,
     ) -> Result<Permit, AcquireError> {
-        let _ = (group, wait);
-        todo!("Part 3")
+       let deadline = Instant::now() + wait;
+
+        let waiters = {
+            let clusters = self.clusters(group).ok_or(AcquireError::UnknownGroup)?;
+            match clusters.first() {
+                Some(c) => Arc::clone(&c.waiters),
+                None => return Err(AcquireError::Busy), // nothing to wait for
+            }
+        };
+
+        let mut queued: Option<QueueGuard> = None;
+
+        loop {
+            let mut notified = pin!(waiters.notify.notified());
+            notified.as_mut().enable();
+
+            match self.try_acquire(group) {
+                Ok(permit) => return Ok(permit),
+                Err(AcquireError::Busy) => {}
+                Err(e) => return Err(e),
+            }
+
+            // Only count as queued once we know we actually have to wait.
+            queued.get_or_insert_with(|| QueueGuard::new(&waiters));
+
+            if timeout_at(deadline, notified).await.is_err() {
+                // Last chance: a slot may have freed right at the deadline.
+                return match self.try_acquire(group) {
+                    Err(AcquireError::Busy) => Err(AcquireError::Timeout),
+                    other => other,
+                };
+            }
+            // Woken: loop and race for the slot (another caller may barge in).
+        }
     }
 
     fn release(&self, group: &str, cluster: &str) {
@@ -197,8 +256,12 @@ impl ClusterPool {
 
     /// Number of callers currently waiting inside `acquire_timeout` for `group`.
     pub fn queued(&self, group: &str) -> u64 {
-        let _ = group;
-        todo!("Part 3")
+        self.groups
+            .read()
+            .unwrap()
+            .get(group)
+            .and_then(|clusters| clusters.first())
+            .map_or(0, |c| c.waiters.queued.load(Ordering::Relaxed))
     }
 
     /// Total queries ever admitted to a cluster (a metric scraped by Prometheus).
@@ -242,9 +305,10 @@ fn build_groups(config: &PoolConfig) -> HashMap<String, Vec<Arc<ClusterState>>> 
         .groups
         .iter()
         .map(|(group, clusters)| {
+            let waiters = Arc::new(Waiters::default()); // one per group
             let states = clusters
                 .iter()
-                .map(|c| Arc::new(ClusterState::new(c)))
+                .map(|c| Arc::new(ClusterState::new(c, Arc::clone(&waiters))))
                 .collect();
             (group.clone(), states)
         })
