@@ -32,13 +32,10 @@ Best-available-capacity-first: Prioritizes clusters with the most available slot
 CAS-based reservation: Treats the atomic reservation as authoritative, preventing concurrent requests from exceeding a cluster’s capacity.
 Fallback on contention: Retries other clusters when reservation fails, reducing unnecessary Busy responses.
 
--
-
-Selection policy, and why:
-
 ## Part 3: Waiting for a slot
 
 ## Part 4: Global admission across 6 pods
+
 
 ## Bonus: INC-5 and INC-6
 
