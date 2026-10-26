@@ -35,7 +35,7 @@ fn bench(c: &mut Criterion) {
                                 barrier.wait();
                                 for _ in 0..iters {
                                     if let Ok(permit) = pool.try_acquire("analytics") {
-                                        permit.release();
+                                        drop(permit);
                                     }
                                 }
                             })
